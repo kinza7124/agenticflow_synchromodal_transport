@@ -1,0 +1,16 @@
+neo4j
+crewai
+crewai-tools
+langgraph
+langchain
+langchain-openai
+langchain-google-genai
+pandas
+numpy
+python-dotenv
+matplotlib
+networkx
+seaborn
+openpyxl
+fastapi
+uvicorn

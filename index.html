@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synchromodal Replanning Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.6.1/dist/mermaid.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <div class="logo">
+                <span class="icon">RE</span>
+                <h1>Synchromodal AI Dashboard</h1>
+            </div>
+            <div class="controls">
+                <button id="runBtn" class="primary-btn">Run Replanning Workflow</button>
+                <div id="statusBadge" class="badge idle">System Idle</div>
+            </div>
+        </header>
+
+        <main>
+            <div class="grid-container">
+                <!-- Left Panel: Workflow Visualization -->
+                <section class="panel workflow-panel">
+                    <div class="panel-header">
+                        <h2>LangGraph Workflow</h2>
+                        <span class="subtitle">Agent Orchestration Status</span>
+                    </div>
+                    <div id="workflowViz" class="viz-container">
+                        <div class="mermaid">
+                            graph TD
+                                Start((Start)) --> Load[Load Network]
+                                Load --> Detect[Detect Disturbances]
+                                Detect --> Negotiate[Run Negotiation]
+                                Negotiate --> Finalize[Finalize]
+                                Finalize --> End((End))
+                                
+                                classDef active fill:#3b82f6,stroke:#fff,stroke-width:2px,color:#fff;
+                                classDef completed fill:#10b981,stroke:#fff,stroke-width:2px,color:#fff;
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Right Panel: Neo4j Graph -->
+                <section class="panel graph-panel">
+                    <div class="panel-header">
+                        <h2>Neo4j Knowledge Graph</h2>
+                        <span class="subtitle">Transportation Network & Assignments</span>
+                        <button id="refreshGraphBtn" class="icon-btn">🔄</button>
+                    </div>
+                    <div id="cy" class="viz-container"></div>
+                </section>
+
+                <!-- Bottom Panel: Results & Logs -->
+                <section class="panel results-panel">
+                    <div class="panel-header">
+                        <h2>Execution Results</h2>
+                    </div>
+                    <div class="results-content">
+                        <div id="reportContainer" class="report-box">
+                            <p class="placeholder">Workflow results will appear here after execution...</p>
+                        </div>
+                        <div class="stats-grid">
+                            <div class="stat-card">
+                                <span class="label">Affected Shipments</span>
+                                <span id="affectedCount" class="value">0</span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="label">Optimization Status</span>
+                                <span id="optStatus" class="value">N/A</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+
+        <footer>
+            <p>&copy; 2024 Synchromodal Replanning System | Powered by LangGraph & Neo4j</p>
+        </footer>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
