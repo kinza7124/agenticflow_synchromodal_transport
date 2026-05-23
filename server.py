@@ -45,6 +45,26 @@ async def lifespan(app: FastAPI):
     _manager = Neo4jManager()
     _workflow_app = create_replanning_workflow()
     logger.info("Neo4j manager and workflow initialised.")
+    
+    # Auto-import network on startup so the dashboard is populated immediately!
+    try:
+        dataset_path = os.path.join("Dataset", "7nodes.xlsx")
+        if not os.path.exists(dataset_path):
+            dataset_path = os.path.join("Dataset (1)", "7nodes (1).xlsx")
+        if os.path.exists(dataset_path):
+            logger.info("Auto-loading default dataset: %s", dataset_path)
+            model, _ = load_dataset_from_excel(dataset_path)
+            _manager.import_network(
+                list(model.terminals.values()),
+                list(model.services.values()),
+                list(model.shipments.values()),
+                list(model.arcs.values()),
+                buffer_times=model.buffer_time,
+            )
+            logger.info("Database successfully pre-populated on startup.")
+    except Exception as e:
+        logger.error("Failed to pre-populate database on startup: %s", e)
+        
     yield
     if _manager:
         _manager.close()
@@ -68,7 +88,11 @@ if os.path.exists("style.css"):
 @app.get("/")
 async def get_index():
     with open("index.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+        response = HTMLResponse(content=f.read())
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
 
 @app.get("/api/workflow")
@@ -146,6 +170,7 @@ async def get_neo4j_graph():
                             "source": n_id,
                             "target": m_id,
                             "label": record.get("r_type", ""),
+                            "type": record.get("r_type", ""),
                         }
                     }
                 )
@@ -209,4 +234,4 @@ async def run_workflow(dataset: str = "7nodes.xlsx"):
 
 
 if __name__ == "__main__":
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)

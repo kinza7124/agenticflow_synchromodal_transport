@@ -85,6 +85,7 @@ def load_network_to_neo4j(state: ReplanningState) -> dict:
         list(model.services.values()),
         list(model.shipments.values()),
         list(model.arcs.values()),
+        buffer_times=model.buffer_time,
     )
     return {"status": "network_loaded"}
 
@@ -181,6 +182,37 @@ def run_agentic_negotiation(state: ReplanningState) -> dict:
     return {"proposals": all_proposals, "status": "negotiation_complete"}
 
 
+def _save_shipment_assignments(state: ReplanningState):
+    """Parse recommendations from shipment agent proposals and update Neo4j."""
+    manager = state["neo4j_manager"]
+    model = state["network_model"]
+    if not manager or not model:
+        return
+
+    valid_arcs = list(model.arcs.keys())
+    for p in state.get("proposals", []):
+        s_id = p.get("shipment_id")
+        result = p.get("result", "")
+        proposal_text = getattr(result, "raw", str(result))
+
+        # Extract matching arc IDs in order of their appearance in the text
+        assigned_arcs = []
+        for arc_id in valid_arcs:
+            idx = proposal_text.find(arc_id)
+            if idx != -1:
+                assigned_arcs.append((idx, arc_id))
+        
+        assigned_arcs.sort()
+        arc_ids = [arc for _, arc in assigned_arcs]
+
+        if arc_ids:
+            logger.info("Saving Neo4j routing assignment for %s: %s", s_id, arc_ids)
+            try:
+                manager.update_shipment_assignment(s_id, arc_ids)
+            except Exception as e:
+                logger.error("Failed to save assignment for %s: %s", s_id, e)
+
+
 def finalize_and_validate(state: ReplanningState) -> dict:
     """
     Consolidate proposals into a final report.
@@ -189,6 +221,12 @@ def finalize_and_validate(state: ReplanningState) -> dict:
     agent receives a compact summary of proposals rather than raw CrewOutput
     objects, keeping the prompt small.
     """
+    # First, persist parsed real-time shipment assignments in Neo4j
+    try:
+        _save_shipment_assignments(state)
+    except Exception as e:
+        logger.error("Error during shipment assignment persistence: %s", e)
+
     manager = state["neo4j_manager"]
     agents_factory = SynchromodalAgents(manager)
     tasks_factory = SynchromodalTasks()
