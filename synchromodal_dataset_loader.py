@@ -30,19 +30,12 @@ import os
 import sys
 import time
 
-# Import the main model — visualization functions are optional
-from synchromodal_replanning_full_implementation import (
-    SynchromodalTransportationModel, Terminal, Service, Shipment, Arc, Disturbance
+# Import the model classes and visualization from synchromodal_model
+from synchromodal_model import (
+    SynchromodalTransportationModel, Terminal, Service, Shipment, Arc, Disturbance,
+    visualize_network
 )
-
-# Conditional import of visualization functions
-try:
-    from synchromodal_replanning_full_implementation import (
-        visualize_network, visualize_kpi_comparison, plot_shipment_flow
-    )
-    VIZ_AVAILABLE = True
-except ImportError:
-    VIZ_AVAILABLE = False
+VIZ_AVAILABLE = True
 
 
 # ================================================================================

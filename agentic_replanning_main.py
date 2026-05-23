@@ -6,13 +6,25 @@ from dotenv import load_dotenv
 os.environ["OTEL_SDK_DISABLED"] = "true"
 os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "true"
 
+# Monkeypatch CrewAI's KickoffTaskOutputsSQLiteStorage to bypass SQLite writes and prevent disk I/O errors
+try:
+    from crewai.memory.storage.kickoff_task_outputs_storage import KickoffTaskOutputsSQLiteStorage
+    KickoffTaskOutputsSQLiteStorage.__init__ = lambda self, db_path=None: None
+    KickoffTaskOutputsSQLiteStorage._initialize_db = lambda self: None
+    KickoffTaskOutputsSQLiteStorage.add = lambda self, task, output, task_index, was_replayed=False, inputs=None: None
+    KickoffTaskOutputsSQLiteStorage.update = lambda self, task_index, **kwargs: None
+    KickoffTaskOutputsSQLiteStorage.load = lambda self: []
+    KickoffTaskOutputsSQLiteStorage.delete_all = lambda self: None
+except Exception:
+    pass
+
 # Add the current directory to path for imports
 sys.path.append(os.getcwd())
 
 from synchromodal_dataset_loader import load_dataset_from_excel
 from neo4j_manager import Neo4jManager
 from workflow import create_replanning_workflow
-from synchromodal_replanning_full_implementation import visualize_network
+from synchromodal_model import visualize_network
 import argparse
 import matplotlib.pyplot as plt
 

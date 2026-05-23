@@ -126,7 +126,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 statusBadge.textContent = 'Workflow Completed';
                 statusBadge.className = 'badge success';
                 reportContainer.innerHTML = `<pre>${data.final_report}</pre>`;
-                affectedCount.textContent = data.affected.length;
+                affectedCount.textContent = (data.affected_shipments || []).length;
                 optStatus.textContent = 'OPTIMIZED';
                 
                 // Refresh graph to show updates
