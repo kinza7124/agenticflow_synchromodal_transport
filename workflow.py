@@ -31,7 +31,11 @@ from typing import TypedDict, List, Dict, Any
 def redact_api_keys(text: str) -> str:
     if not isinstance(text, str):
         return text
-    return re.sub(r'AIzaSy[A-Za-z0-9_\-]{10,40}', '[REDACTED_API_KEY]', text)
+    # Redact Gemini / Google keys
+    text = re.sub(r'AIzaSy[A-Za-z0-9_\-]{10,45}', '[REDACTED_GOOGLE_KEY]', text)
+    # Redact Groq keys (gsk_...)
+    text = re.sub(r'gsk_[A-Za-z0-9_\-]{20,80}', '[REDACTED_GROQ_KEY]', text)
+    return text
 
 
 from langgraph.graph import StateGraph, END

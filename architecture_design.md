@@ -1,153 +1,145 @@
-# Agentic Synchromodal Architecture Design
+# Architecture & System Design: Agentic Synchromodal Freight Replanning
 
-This document describes the architecture of the LangGraph-based agentic approach for synchromodal freight replanning.
+This document provides a detailed breakdown of the system architecture, technology stack, agent personas, database modeling, and step-by-step workflow of the Synchromodal Control Tower application.
 
-## Architecture Diagram
+---
 
-```mermaid
-graph TD
-    %% Entry Point
-    Start((Start)) --> Main[agentic_replanning_main.py]
-    
-    subgraph Data_Layer [Data & Persistence]
-        DB[(Neo4j Graph Database)]
-        Excel[7nodes.xlsx Dataset]
-        Loader[Dataset Loader]
-    end
+## 1. High-Level System Architecture
 
-    Main --> Loader
-    Loader --> Excel
-    Main --> Workflow[LangGraph Orchestrator]
+The application is split into three main layers:
+1. **Presentation Layer (Frontend)**: Next.js dashboard providing real-time data visualization via Cytoscape.js.
+2. **Orchestration & Execution Layer (FastAPI & LangGraph)**: The backend web server hosting the deterministic state machine and the LLM agent crews.
+3. **Database & Cognitive Layer (Neo4j & Groq/Llama)**: A graph database representing the physical supply chain networks, queried dynamically by AI agents running on Llama-3.3.
 
-    subgraph LangGraph_Workflow [LangGraph State Machine]
-        direction TB
-        Node1[Node: load_network] --> Node2[Node: detect_disturbances]
-        Node2 --> Node3[Node: run_negotiation]
-        Node3 --> Node4[Node: finalize]
-        Node4 --> EndNode((END))
-    end
+---
 
-    %% Interactions with Neo4j
-    Node1 -- "Neo4jManager.import_network()" --> DB
-    
-    subgraph CrewAI_Negotiation [CrewAI: run_negotiation Node]
-        direction LR
-        ShipAgent[Shipment Agent] -- "Task: negotiate_route" --> Result[Routing Proposal]
-    end
+## 2. Technology Stack
 
-    subgraph CrewAI_Finalization [CrewAI: finalize Node]
-        direction LR
-        Coord[Logistics Coordinator] -- "Task: finalize_replanning" --> Report[Final Report]
-    end
+- **Frontend Framework**: **Next.js 16 (React, Vanilla CSS Modules)**
+  - *Graph Rendering*: **Cytoscape.js** for rendering interactive nodes (Terminals, Services, Shipments, Arcs) and paths.
+  - *Layout Engine*: Built-in geographical scaling layout that automatically maps longitude/latitude coordinates onto the browser's viewport.
+- **Backend API**: **FastAPI (Python)** & **Uvicorn**
+  - Handles CORS middlewares, coordinates asynchronous request threads, and triggers the optimization pipeline.
+- **State Orchestrator**: **LangGraph (LangChain ecosystem)**
+  - Used to define a deterministic `StateGraph` that manages system states, handles execution loops, and ensures strict workflow boundaries.
+- **Multi-Agent Framework**: **CrewAI**
+  - Organizes agents, tasks, and tools into cooperative groups (Crews) to achieve specific goals.
+- **Database (Supply Chain Environment)**: **Neo4j / AuraDB (Graph Database)**
+  - Used for storing transportation scheduling, terminals, service capacities, and shipment routing links. Connected via the `bolt` protocol. Includes a local **in-memory dict simulator fallback** if the database connection goes offline.
+- **LLM Engine**: **Groq API (`Llama-3.3-70b-versatile`)**
+  - Serves as the cognitive worker inside CrewAI. It dynamically decides which tools to call, parses tool outputs, and negotiates path routing based on supply chain constraints.
 
-    Node3 --> CrewAI_Negotiation
-    Node4 --> CrewAI_Finalization
+---
 
-    subgraph Tools_Layer [Agent Tools]
-        PTool[Pathfinding Tool]
-        CTool[Cost Calculator Tool]
-        CapTool[Service Capacity Tool]
-        STool[Neo4j Search Tool]
-    end
+## 3. Database Graph Schema (Neo4j)
 
-    %% Tool usage
-    ShipAgent --> PTool
-    ShipAgent --> CTool
-    ShipAgent --> CapTool
-    
-    Coord --> STool
-    Coord --> PTool
+The transportation network is modeled as a directed graph representing physical infrastructure and scheduling timetables:
 
-    %% Connectivity to DB
-    Tools_Layer -- "Cypher Queries" --> DB
+### Nodes
+- **`:Terminal`**: Represents hubs, ports, and transshipment locations.
+  - Properties: `id`, `name`, `type` (`port` or `hub`), `lat`, `lon`.
+- **`:Service`**: Represents carrier routes (Barge lines, Rail operators, Truck fleets).
+  - Properties: `id`, `mode` (`barge`, `rail`, `truck`), `capacity` (TEU), `fixed_cost`, `variable_cost`, `departure_time`, `arrival_time`.
+- **`:Arc`**: Represents a scheduled transit leg between two terminals.
+  - Properties: `id`, `from_terminal`, `to_terminal`, `service_id`, `departure_time`, `arrival_time`, `traverse_time`, `variable_cost`, `buffer_time`.
+- **`:Shipment`**: Represents cargo that needs to be moved.
+  - Properties: `id`, `origin`, `destination`, `volume` (TEU), `release_time`, `due_time`, `latest_time`, `early_penalty`, `late_penalty`, `status` (`pending`, `assigned`).
 
-    %% LLM
-    Gemini{{Google Gemini Flash LLM}}
-    ShipAgent -.-> Gemini
-    Coord -.-> Gemini
+### Relationships
+- `(:Terminal)-[:DEPARTURE_ARC]->(:Arc)`: Connects an origin terminal to its outgoing scheduled transit leg.
+- `(:Arc)-[:ARRIVAL_ARC]->(:Terminal)`: Connects a transit leg to its destination terminal.
+- `(:Service)-[:HAS_ARC]->(:Arc)`: Groups scheduled transit segments under their parent service carrier.
+- `(:Shipment)-[:ORIGINATES_AT]->(:Terminal)`: Indicates where cargo begins.
+- `(:Shipment)-[:DESTINED_FOR]->(:Terminal)`: Indicates the final cargo destination.
+- `(:Shipment)-[:ASSIGNED_TO]->(:Arc)`: **(Dynamic)** Created at run time to record which scheduled legs were selected for the shipment.
 
-    style LangGraph_Workflow fill:#f9f,stroke:#333,stroke-width:2px
-    style CrewAI_Negotiation fill:#bbf,stroke:#333,stroke-width:1px
-    style CrewAI_Finalization fill:#bbf,stroke:#333,stroke-width:1px
-    style DB fill:#77DD77,stroke:#333
-    style Gemini fill:#FFD700,stroke:#333
+---
+
+## 4. Multi-Agent Personas & Tasks
+
+To resolve transportation delays without writing rigid hardcoded algorithms, the system models the problem as a **Logistics Control Tower** using AI agents:
+
+### 1. Shipment Agent (`agents.py`)
+- **Persona**: A dedicated advocate representing a single cargo shipment. 
+- **Goal**: Find the lowest-cost, feasible route from its origin to its destination.
+- **Constraints**: Prefer environmentally sustainable modes (barge and rail); resort to truck fleets only if the cargo release delay puts delivery deadlines at risk.
+- **Tools**:
+  - *Pathfinding Tool*: Asks Neo4j for feasible path paths that fit the time window (accounting for transshipment buffer times).
+  - *Service Capacity Tool*: Inquires about current available space (TEU) on scheduled legs.
+  - *Cost Calculator Tool*: Evaluates total route pricing based on shipment volume.
+- **Task (`tasks.py` -> `negotiate_route`)**:
+  Call pathfinding tools, query capacity on candidate arcs, compute pricing, and output the recommended route proposals.
+
+### 2. Logistics Coordinator (`agents.py`)
+- **Persona**: The network supervisor overseeing the entire network (Port of Rotterdam).
+- **Goal**: Review all shipment proposals, resolve capacity conflicts, and optimize global KPIs (modal split and total network cost).
+- **Tools**:
+  - *Neo4j Search Tool*: Performs raw Cypher queries to audit database state.
+  - *Pathfinding Tool*: Re-evaluates routes if a cargo assignment must be shifted.
+- **Task (`tasks.py` -> `finalize_replanning`)**:
+  Examine all individual Shipment Agent proposals, identify over-allocated legs, resolve booking overlaps, write final assignments back to Neo4j, and report the network KPIs.
+
+---
+
+## 5. Step-by-Step System Workflow
+
+The entire replanning pipeline executes sequentially as follows:
+
+```
+[User dropdown change]
+       │
+       ▼
+1. /api/select_dataset
+   - Clear database (Neo4j / AuraDB)
+   - Parse selected Excel sheet (e.g. 8nodes.xlsx)
+   - Auto-correct data anomalies (e.g. missing terminal nodes)
+   - Bulk-import Terminals, Services, Arcs, and Shipments into database
+   - Update Cytoscape Graph in Frontend
+       │
+[User click "Run Replanning"]
+       │
+       ▼
+2. /api/run
+   - Inject disturbance in-memory (e.g., set cargo release times to 9.0h)
+   - Initialize LangGraph state machine
+       │
+       ▼
+3. load_network node
+   - Synchronize current network configuration to database
+       │
+       ▼
+4. detect_disturbances node
+   - Compare shipment release delays against baseline scheduled departures
+   - Flag "affected shipments" and cap them to save API tokens
+       │
+       ▼
+5. run_negotiation node
+   - For each affected shipment, spin up a dedicated CrewAI Shipment Agent
+   - Agents autonomously run pathfinding, capacity, and cost tools
+   - Output routing recommendations
+       │
+       ▼
+6. finalize node
+   - Spawn a Logistics Coordinator Agent
+   - The coordinator audits capacities, resolves double-bookings, and writes
+     the final ASSIGNED_TO edges back to Neo4j / AuraDB
+   - Generate structured report (modal split, cost, path breakdowns)
+       │
+       ▼
+7. Update Dashboard
+   - Reload graph from Neo4j (renders chosen routes in purple on Cytoscape canvas)
+   - Display final report to user
 ```
 
-## Technical Workflow Breakdown
+---
 
-### 1. Orchestration Layer (LangGraph)
-- **State Management**: Tracks the `network_model`, `neo4j_manager`, `affected_shipments`, and `proposals` across nodes.
-- **Node-Based Flow**:
-    - `load_network`: Clears and re-imports the current network model into Neo4j.
-    - `detect_disturbances`: Identifies which shipments need replanning based on delay data.
-    - `run_negotiation`: Triggers the agentic route discovery process.
-    - `finalize`: Consolidates multi-agent proposals into a single valid plan.
+## 6. Codebase File Directory Guide
 
-### 2. Multi-Agent Layer (CrewAI)
-- **Shipment Agent**: Represents individual cargo interests. Its goal is to find the most cost-effective path using specific constraints (time windows, service modes).
-- **Logistics Coordinator**: Represents the port/network operator. It resolves capacity conflicts and ensures the overall network KPI (modal split and cost) is optimized.
-- **Service Operator (Optional/Ready)**: Designed to manage specific modes like Barge or Rail and report real-time capacity.
-
-### 3. Intelligence & Tooling
-- **LLM**: Powered by **Google Gemini Flash** for high-speed reasoning and tool selection.
-- **Pathfinding Tool**: Queries Neo4j for feasible routes between terminals.
-- **Service Capacity Tool**: Checks real-time TEU availability on specific transport arcs.
-- **Cost Calculator Tool**: Computes the variable cost of a proposed shipment path.
-
-### 4. Persistence Layer (Neo4j)
-- **Graph Modeling**: Represents the transportation network as nodes (Terminals) and edges (Services/Arcs).
-- **Relational Integrity**: Tracks which shipments are assigned to which services, allowing for real-time capacity monitoring.
-
-### 5. Division of Labor
-
-To understand how the technologies fit together without overlapping:
-
-- **Neo4j (The Environment/Memory)**: Stores the static and dynamic state of the world (terminals, arcs, available TEU capacities, costs). It answers specific queries but does not "think."
-- **LangGraph (The Orchestrator)**: Acts as the rigid assembly line. It strictly enforces the workflow order of operations (`load_network` -> `detect_disturbances` -> `run_negotiation` -> `finalize`).
-- **Gemini LLM (The Cognitive Worker)**: Sits *inside* the LangGraph nodes (specifically powering the CrewAI agents). It acts as the "brain," dynamically analyzing the disturbances, deciding what Neo4j queries to run via autonomous tool selection, interpreting the graph data, and handling complex logic and negotiation to make final routing decisions.
-
-## Detailed Agentic Approach
-
-In this project, you are using a **Multi-Agent System** (powered by the CrewAI framework) embedded inside a larger deterministic workflow (LangGraph). 
-
-This "agentic approach" means that instead of writing hard-coded `if/else` statements for every possible scenario (e.g., *if ship is delayed, then route via train, unless train is full, then route via truck*), you define **personas** (Agents), give them **abilities** (Tools), and assign them **goals** (Tasks). The Gemini LLM acts as the reasoning engine for these agents.
-
-Here is a detailed breakdown of how your specific agentic approach works:
-
-### 1. The Personas (The Agents)
-You have designed specific roles to mimic a real-world logistics control tower (in `agents.py`):
-*   **Shipment Agent:** A dedicated advocate for a single piece of cargo. Its only goal is to ensure *its specific shipment* gets to the destination on time and as cheaply as possible. It is heavily constrained by time windows and prefers rail/barge but will resort to trucks if deadlines are tight.
-*   **Logistics Coordinator:** The supervisor. It looks at the big picture of the port/network. Its goal is to make sure the whole system runs smoothly, resolving conflicts between multiple shipment agents and keeping the overall network sustainable (favoring rail/barge over trucks).
-*   **Service Operator:** Represents the transport providers (e.g., the Rail or Barge operators). It monitors its own capacity and ensures its specific mode of transport is filled efficiently without overbooking.
-
-### 2. The Abilities (The Tools)
-Agents cannot magically know the state of your supply chain. You provide them with specific tools (in `tools.py`) that they can autonomously choose to use when they need information:
-*   **Pathfinding Tool:** Allows an agent to ask, "What are the physical routes from Terminal A to Terminal B?"
-*   **Cost Calculator Tool:** Allows an agent to ask, "If I take this route, how much will it cost?"
-*   **Service Capacity Tool:** Allows an agent to ask, "Does this barge still have room for my 10 containers?"
-*   **Neo4j Search Tool:** A general query tool for the Logistics Coordinator to understand the overall state of the network.
-
-### 3. The Workflow (How they collaborate)
-The process of how these agents work together is structured by LangGraph (in `workflow.py`):
-1.  **Micro-Crews for Negotiation:** When a delay happens, LangGraph doesn't just create one massive team. Instead, it creates a "micro-crew" for *each affected shipment*. The **Shipment Agent** is given the task to negotiate a route. It uses the Gemini LLM to think: *"I need to go from Rotterdam to Duisburg. Let me use the Pathfinding Tool. Okay, I found a route. Now let me use the Cost Tool to check the price. It's cheap, but let me check the Capacity Tool. Oh, it's full. Let me find another route."*
-2.  **Finalization:** Once all the individual Shipment Agents have come up with proposals for their cargo, LangGraph passes all of these proposals to a new Crew led by the **Logistics Coordinator**. The Coordinator uses Gemini to review all the proposals together, ensuring no two agents accidentally double-booked a train, and then outputs a final, validated replanning report.
-
-### Why is this approach powerful?
-*   **Autonomy:** You don't have to program the exact sequence of database queries. The LLM figures out which tool to use based on what it discovers.
-*   **Scalability & Isolation:** By having individual Shipment Agents, the logic for routing cargo 'A' is isolated from cargo 'B' until the Coordinator steps in.
-*   **Resilience:** If a database query returns an unexpected result (like a closed terminal), the agent can dynamically adapt and search for an alternative rather than crashing the program.
-
-## Running the Application
-
-To run this agentic pipeline in sequence, ensure your `.env` file contains your credentials (Neo4j and Gemini API Key), then execute the following:
-
-1. **Start the Web Interface / Backend Server (Recommended for visual dashboard):**
-   ```bash
-   python server.py
-   ```
-   *(This starts the FastAPI server that interacts with LangGraph and serves the frontend.)*
-
-2. **Run the CLI Workflow Directly (For terminal debugging):**
-   ```bash
-   python agentic_replanning_main.py
-   ```
+- **`server.py`**: The entry point for the FastAPI server. Defines routes for database loading, fetching Cytoscape JSON structures, and invoking the LangGraph state machine.
+- **`workflow.py`**: Compiles the LangGraph `StateGraph`. Defines the deterministic nodes (`load_network`, `detect_disturbances`, `run_negotiation`, `finalize`) and passes state payloads between them.
+- **`agents.py`**: Configures the CrewAI personas, setting system instructions, backstory constraints, and binding the shared tool instances.
+- **`tasks.py`**: Defines token-efficient task prompts for the CrewAI agent runs.
+- **`tools.py`**: Houses the custom python tools called by the agents, translating agent instructions into Cypher graph queries.
+- **`neo4j_manager.py`**: Exposes query execution APIs, bulk-delete actions, batched UNWIND queries, pathfinding algorithms, and the in-memory fallback dictionary database.
+- **`synchromodal_dataset_loader.py`**: Parses Excel layouts. Crucially includes dynamic terminal addition to prevent database-to-UI relationship crashes when spreadsheets contain data anomalies.
+- **`frontend/src/app/page.js`**: Home dashboard component. Initializes Cytoscape.js, dynamically scales geography positions, manages select API triggers, and filters elements to safeguard against rendering crashes.

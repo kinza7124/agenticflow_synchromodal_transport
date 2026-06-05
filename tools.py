@@ -1,73 +1,149 @@
+"""
+CrewAI Tools — optimized to minimize Neo4j round-trips per call.
+"""
 from crewai.tools import BaseTool
-from neo4j_manager import Neo4jManager
-from typing import List, Dict, Any
+from typing import List, Any
+
 
 class Neo4jSearchTool(BaseTool):
     name: str = "Neo4j Search Tool"
-    description: str = "Search for paths and service statuses in the Neo4j transportation graph."
+    description: str = (
+        "Execute a raw Cypher query against the Neo4j transportation graph. "
+        "Use for ad-hoc lookups not covered by other tools."
+    )
     manager: Any = None
 
     def _run(self, query: str) -> str:
         if not self.manager:
             return "Neo4j manager not initialized."
         results = self.manager.query(query)
-        return str(results)
+        return str(results[:20])  # cap output to avoid bloating LLM context
+
 
 class PathfindingTool(BaseTool):
     name: str = "Pathfinding Tool"
-    description: str = "Find feasible paths between terminals given time constraints. Use technical IDs (e.g., 'POR', 'DUIS')."
+    description: str = (
+        "Find feasible transportation paths between two terminals within a time window. "
+        "Input format: 'ORIGIN,DESTINATION,EARLIEST_HOUR,LATEST_HOUR' "
+        "using terminal IDs (e.g., 'POR,DUIS,9.0,24.0'). "
+        "Returns ranked paths with arc IDs and costs."
+    )
     manager: Any = None
 
-    def _run(self, origin: str, destination: str, earliest: float, latest: float) -> str:
-        """Finds feasible paths. IMPORTANT: Use Terminal IDs (e.g., 'POR', 'DUIS'), NOT city names."""
+    def _run(self, input_str: str) -> str:
+        """
+        Accepts a comma-separated string: origin,destination,earliest,latest
+        This avoids the LLM needing to pass 4 separate keyword arguments.
+        """
         if not self.manager:
             return "Neo4j manager not initialized."
-        paths = self.manager.find_feasible_paths(origin, destination, float(earliest), float(latest))
+        try:
+            parts = [p.strip() for p in input_str.split(",")]
+            if len(parts) != 4:
+                return (
+                    "Invalid input. Expected: 'ORIGIN,DESTINATION,EARLIEST,LATEST' "
+                    f"but got: '{input_str}'"
+                )
+            origin, destination, earliest, latest = parts
+            paths = self.manager.find_feasible_paths(
+                origin, destination, float(earliest), float(latest)
+            )
+        except Exception as e:
+            return f"Error running pathfinding: {e}"
+
         if not paths:
-            return f"No feasible paths found between {origin} and {destination} within the given time windows. Try searching for terminal IDs if you used city names."
-        return str(paths)
+            return (
+                f"No feasible paths found between {origin} and {destination} "
+                f"within [{earliest}, {latest}]. "
+                "Verify terminal IDs are correct (e.g., 'POR', 'DUIS', 'T1')."
+            )
+
+        # Format concisely so the LLM gets structured, token-efficient output
+        lines = [f"Found {len(paths)} path(s):"]
+        for i, p in enumerate(paths[:5], 1):  # show top 5
+            arc_ids = p.get("arc_ids", [])
+            total_cost = p.get("total_cost", "?")
+            arr_times = p.get("arr_times", [])
+            last_arrival = arr_times[-1] if arr_times else "?"
+            lines.append(
+                f"  Path {i}: arcs={arc_ids}, total_cost=€{total_cost}, "
+                f"arrival={last_arrival}h"
+            )
+        return "\n".join(lines)
+
 
 class ServiceCapacityTool(BaseTool):
     name: str = "Service Capacity Tool"
-    description: str = "Check the remaining capacity of a specific service on a given arc."
+    description: str = (
+        "Check remaining capacity on a specific arc. "
+        "Input: arc_id (e.g., 'v0001_POR_DUIS'). "
+        "Returns available TEU, total capacity, and current utilisation."
+    )
     manager: Any = None
 
-    def _run(self, service_id: str, arc_id: str) -> str:
+    def _run(self, arc_id: str) -> str:
         if not self.manager:
             return "Neo4j manager not initialized."
-        # Query to get total volume assigned to this arc
-        query = """
-        MATCH (a:Arc {id: $arc_id})<-[:ASSIGNED_TO]-(s:Shipment)
-        RETURN sum(s.volume) as used_volume
-        """
-        res = self.manager.query(query, {"arc_id": arc_id})
-        used = res[0]['used_volume'] if res and res[0]['used_volume'] else 0
-        
-        # Get service capacity
-        svc = self.manager.get_service_status(service_id)
-        capacity = svc.get('capacity', 0)
-        
-        return f"Service {service_id} on arc {arc_id} has {capacity - used} TEU available out of {capacity}."
+        arc_id = arc_id.strip()
+        data = self.manager.get_arc_with_capacity(arc_id)
+        if not data:
+            return f"Arc '{arc_id}' not found in the graph."
+
+        capacity = data.get("capacity", 0)
+        used = data.get("used_volume", 0)
+        available = data.get("available", capacity - used)
+        arc = data.get("a", {})
+        return (
+            f"Arc {arc_id}: capacity={capacity} TEU, used={used} TEU, "
+            f"available={available} TEU | "
+            f"departs={arc.get('departure_time')}h, arrives={arc.get('arrival_time')}h"
+        )
+
 
 class CostCalculatorTool(BaseTool):
     name: str = "Cost Calculator Tool"
-    description: str = "Calculate the total cost of a proposed path for a shipment."
+    description: str = (
+        "Calculate the total variable transport cost for a shipment along a list of arcs. "
+        "Input format: 'SHIPMENT_ID:ARC_ID1,ARC_ID2,...' "
+        "(e.g., 'S1:v0001_POR_DUIS,v0002_DUIS_MOE'). "
+        "Returns the estimated cost in euros."
+    )
     manager: Any = None
 
-    def _run(self, shipment_id: str, arc_ids: List[str]) -> str:
+    def _run(self, input_str: str) -> str:
         if not self.manager:
             return "Neo4j manager not initialized."
-        
-        # Get shipment volume
-        shipment_query = "MATCH (s:Shipment {id: $id}) RETURN s"
-        shipment = self.manager.query(shipment_query, {"id": shipment_id})[0]['s']
-        volume = shipment['volume']
-        
-        total_var_cost = 0
-        for arc_id in arc_ids:
-            arc_query = "MATCH (a:Arc {id: $id}) RETURN a"
-            arc = self.manager.query(arc_query, {"id": arc_id})[0]['a']
-            total_var_cost += arc['variable_cost'] * volume
-            
-        # Simplified cost - in a real scenario we'd add transshipment and fixed costs
-        return f"Total estimated variable cost for shipment {shipment_id} via {arc_ids} is €{total_var_cost:.2f}."
+        try:
+            shipment_part, arcs_part = input_str.split(":", 1)
+            shipment_id = shipment_part.strip()
+            arc_ids = [a.strip() for a in arcs_part.split(",") if a.strip()]
+        except ValueError:
+            return (
+                "Invalid input. Expected: 'SHIPMENT_ID:ARC_ID1,ARC_ID2,...' "
+                f"but got: '{input_str}'"
+            )
+
+        # Single query: fetch shipment volume + all arc costs at once
+        result = self.manager.query(
+            """
+            MATCH (s:Shipment {id: $shipment_id})
+            WITH s.volume AS volume
+            UNWIND $arc_ids AS arc_id
+            MATCH (a:Arc {id: arc_id})
+            RETURN volume, arc_id, a.variable_cost AS var_cost
+            """,
+            {"shipment_id": shipment_id, "arc_ids": arc_ids},
+        )
+
+        if not result:
+            return f"Shipment '{shipment_id}' or one of the arcs not found."
+
+        volume = result[0]["volume"]
+        total_cost = sum(row["var_cost"] * volume for row in result if row["var_cost"])
+        breakdown = ", ".join(
+            f"{row['arc_id']}=€{row['var_cost'] * volume:.2f}" for row in result
+        )
+        return (
+            f"Shipment {shipment_id} ({volume} TEU) via {arc_ids}: "
+            f"total=€{total_cost:.2f} | breakdown: {breakdown}"
+        )

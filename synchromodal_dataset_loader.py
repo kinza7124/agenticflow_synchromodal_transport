@@ -224,6 +224,14 @@ def load_dataset_from_excel(filepath: str) -> Tuple[SynchromodalTransportationMo
                 origin = t_id_map.get(origin_raw, origin_raw)
                 dest = t_id_map.get(dest_raw, dest_raw)
                 
+                # Dynamic terminal creation for any missing shipment origin/destination
+                if origin not in model.terminals:
+                    lon, lat = _get_terminal_coords(origin, len(model.terminals))
+                    model.add_terminal(Terminal(id=origin, name=origin, type='hub', lat=lat, lon=lon))
+                if dest not in model.terminals:
+                    lon, lat = _get_terminal_coords(dest, len(model.terminals))
+                    model.add_terminal(Terminal(id=dest, name=dest, type='hub', lat=lat, lon=lon))
+                
                 model.add_shipment(Shipment(
                     id=f"S{i+1}",
                     origin=origin,
@@ -380,6 +388,14 @@ def load_dataset_from_excel(filepath: str) -> Tuple[SynchromodalTransportationMo
             o_id = t_id_map.get(o_raw, o_raw)
             d_raw = str(shipment_labels['dest'][i]).strip()
             d_id = t_id_map.get(d_raw, d_raw)
+            
+            # Dynamic terminal creation for any missing shipment origin/destination
+            if o_id not in model.terminals:
+                lon, lat = _get_terminal_coords(o_id, len(model.terminals))
+                model.add_terminal(Terminal(id=o_id, name=o_id, type='hub', lat=lat, lon=lon))
+            if d_id not in model.terminals:
+                lon, lat = _get_terminal_coords(d_id, len(model.terminals))
+                model.add_terminal(Terminal(id=d_id, name=d_id, type='hub', lat=lat, lon=lon))
             
             model.add_shipment(Shipment(
                 id=f"S{i+1}", origin=o_id, destination=d_id,
